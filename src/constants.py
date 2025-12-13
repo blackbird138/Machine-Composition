@@ -18,7 +18,7 @@ MIDI_TO_PITCH = {v: k for k, v in PITCHES.items()}
 
 # Durations in quarter notes
 # 0.5 = eighth note, 1.0 = quarter note, 2.0 = half note
-DURATIONS = [0.5, 1.0, 2.0]
+DURATIONS = [0.5, 1.0]
 
 # Musical parameters
 TARGET_BEATS = 16  # 4 measures * 4 beats

@@ -86,13 +86,7 @@ class GeneticOperators:
                 child_notes.append(adjusted_note)
                 current_beats += remaining
         
-        # Ensure exactly TARGET_BEATS
-        while current_beats < TARGET_BEATS:
-            remaining = TARGET_BEATS - current_beats
-            duration = min(random.choice(DURATIONS), remaining)
-            child_notes.append(Note(random.choice(PITCH_VALUES), duration))
-            current_beats += duration
-        
+        self._fix_total_beats(child_notes)
         return Melody(child_notes)
 
     def mutate(self, melody):
@@ -119,11 +113,47 @@ class GeneticOperators:
             if random.random() < self.mutation_rate:
                 note.duration = random.choice(DURATIONS)
         
-        # Re-normalize to exactly TARGET_BEATS
-        current_beats = sum(n.duration for n in mutated.notes)
-        if abs(current_beats - TARGET_BEATS) > 0.1:
-            if mutated.notes:
-                adjustment = TARGET_BEATS - current_beats
-                mutated.notes[-1].duration = max(0.5, mutated.notes[-1].duration + adjustment)
-        
+        self._fix_total_beats(mutated.notes)
         return mutated
+
+    # -----------------------
+    # Helpers
+    # -----------------------
+    def _snap(self, duration: float) -> float:
+        """Snap duration to nearest 0.5 beat (eighth-note base)."""
+        return max(0.5, round(duration * 2) / 2)
+
+    def _fix_total_beats(self, notes):
+        """Ensure the melody totals TARGET_BEATS with 0.5-beat granularity."""
+        if not notes:
+            return
+        max_dur = max(DURATIONS)
+
+        # Snap all durations to 0.5 grid
+        for n in notes:
+            n.duration = self._snap(n.duration)
+
+        total = sum(n.duration for n in notes)
+        delta = TARGET_BEATS - total
+
+        # If we are short, append filler notes (do not inflate existing notes beyond max_dur)
+        while delta > 1e-6:
+            dur = self._snap(min(delta, max_dur))
+            notes.append(Note(random.choice(PITCH_VALUES), dur))
+            delta -= dur
+
+        # If we are long, trim from the tail without going below 0.5
+        if delta < -1e-6:
+            need = -delta
+            for i in range(len(notes) - 1, -1, -1):
+                reducible = max(0.0, notes[i].duration - 0.5)
+                take = min(reducible, need)
+                if take > 0:
+                    notes[i].duration = self._snap(notes[i].duration - take)
+                    need -= take
+                if need <= 1e-6:
+                    break
+            # If still too long, drop the last note if it exists and retry once
+            if need > 1e-6 and len(notes) > 1:
+                notes.pop()
+                self._fix_total_beats(notes)
