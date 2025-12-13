@@ -78,10 +78,10 @@ class FitnessEvaluator:
         # 1) Harmony inference is the core:
         progression, harmony_score, harmony_debug = self._harmony_fitness(notes)
 
-        # 2) Small tie-breakers (optional but helpful):
-        contour_score = self._melodic_contour(notes)     # 0-15
-        rhythmic_score = self._rhythmic_variety(notes)   # 0-10
-        cadence_score = self._cadence_melody_side(notes) # 0-5 (melody-only cadence hint)
+        # 2) Tie-breakers (lightweight; rhythm carries smarter weight):
+        contour_score = self._melodic_contour(notes)       # 0-15
+        rhythmic_score = self._rhythmic_interest(notes)    # 0-24 (variety + balance + syncopation)
+        cadence_score = self._cadence_melody_side(notes)   # 0-5 (melody-only cadence hint)
 
         total = harmony_score + contour_score + rhythmic_score + cadence_score
 
@@ -107,14 +107,152 @@ class FitnessEvaluator:
                 score -= 1.5
         return max(0.0, score)
 
-    def _rhythmic_variety(self, notes) -> float:
+    def _rhythmic_interest(self, notes) -> float:
         """
-        0-10: Reward variety (FIX your original sign bug).
+        0-24: Smarter rhythm score.
+        Components:
+          - Duration variety (0-8)
+          - Balance / maximal evenness via entropy (0-6)
+          - Penalize long runs of identical durations (0 to -6)
+          - Downbeat support (0-8)
+          - Syncopation / off-beat presence (“奇性”) (0-6)
         """
         durations = [n.duration for n in notes]
+        if not durations:
+            return 0.0
+
+        # Precompute onsets for syncopation and downbeat logic
+        onsets = []
+        t = 0.0
+        for n in notes:
+            onsets.append((t, n.duration))
+            t += n.duration
+
+        # 1) Variety of durations (encourage at least 2-3 kinds)
         unique = len(set(durations))
         denom = max(1, len(DURATIONS))
-        return (unique / denom) * 10.0
+        variety = min(1.0, unique / denom) * 8.0  # 0..8
+
+        # 2) Balance / maximal evenness: encourage near-uniform use of available durations
+        balance = self._duration_balance_entropy(durations)  # 0..6
+
+        # 3) Penalize long identical runs (avoid monotonous grids)
+        penalty = 0.0
+        run_len = 1
+        for i in range(1, len(durations)):
+            if durations[i] == durations[i - 1]:
+                run_len += 1
+            else:
+                if run_len >= 4:
+                    penalty += (run_len - 3) * 1.5  # each extra adds penalty
+                run_len = 1
+        if run_len >= 4:
+            penalty += (run_len - 3) * 1.5
+        penalty = min(penalty, 6.0)  # cap penalty
+
+        # 4) Downbeat support: longer notes on bar starts sound more grounded
+        downbeat_bonus = self._downbeat_bonus_onsets(onsets)
+
+        # 5) Syncopation / off-beat presence (奇性): reward tasteful off-beat starts / ties
+        sync_bonus = self._syncopation_bonus(onsets)
+
+        # 6) Bar-to-bar rhythmic similarity: encourage reusable groove cells
+        similarity_bonus = self._bar_rhythm_similarity(onsets)
+
+        score = variety + balance - penalty + downbeat_bonus + sync_bonus + similarity_bonus
+        return max(0.0, min(24.0, score))
+
+    def _downbeat_bonus_onsets(self, onsets) -> float:
+        """Reward placing longer notes (>=1 beat) on bar downbeats."""
+        if not onsets:
+            return 0.0
+
+        bonus = 0.0
+        for start, dur in onsets:
+            beat_in_measure = start % self.beats_per_measure
+            if beat_in_measure < 1e-6 and dur >= 1.0:  # starts exactly on barline and lasts at least a quarter
+                bonus += 1.6
+        return min(8.0, bonus)
+
+    def _syncopation_bonus(self, onsets) -> float:
+        """Reward tasteful off-beat or cross-beat placements (奇性)."""
+        if not onsets:
+            return 0.0
+
+        bonus = 0.0
+        for start, dur in onsets:
+            beat_pos = start % self.beats_per_measure
+            within_beat = beat_pos % 1.0
+
+            # Off-beat starts (e.g., on 0.5) get a small bonus
+            if 0.45 < within_beat < 0.55:
+                bonus += 0.8
+
+            # Cross-beat tie / syncopation: duration spans over a beat boundary
+            if within_beat + dur > 1.0 and dur >= 0.5:
+                bonus += 1.0
+
+        return min(6.0, bonus)
+
+    def _bar_rhythm_similarity(self, onsets) -> float:
+        """Encourage similar rhythmic cells across 4 bars (up to 6 points)."""
+        if not onsets:
+            return 0.0
+
+        bar_len = self.beats_per_measure
+        slots_per_bar = int(bar_len * 2)  # 0.5 beat grid
+        bars = [[] for _ in range(4)]
+
+        # Build slot patterns for each bar (onset '1', sustain '0')
+        for start, dur in onsets:
+            bar_idx = int(start // bar_len)
+            if bar_idx >= 4:
+                break
+            rel = start - bar_idx * bar_len
+            remaining = dur
+            pos = int(round(rel * 2))
+            while remaining > 1e-6 and pos < slots_per_bar:
+                bars[bar_idx].append('1' if remaining == dur else '0')
+                remaining -= 0.5
+                pos += 1
+
+        # Normalize lengths to slots_per_bar
+        bar_patterns = []
+        for b in bars:
+            if len(b) < slots_per_bar:
+                b = b + ['0'] * (slots_per_bar - len(b))
+            else:
+                b = b[:slots_per_bar]
+            bar_patterns.append(''.join(b))
+
+        # Pairwise Hamming similarity among available bars
+        sims = []
+        for i in range(len(bar_patterns)):
+            for j in range(i + 1, len(bar_patterns)):
+                a, b = bar_patterns[i], bar_patterns[j]
+                if not a or not b:
+                    continue
+                matches = sum(1 for x, y in zip(a, b) if x == y)
+                sims.append(matches / len(a))
+
+        if not sims:
+            return 0.0
+        avg_sim = sum(sims) / len(sims)  # 0..1
+        return min(6.0, max(0.0, avg_sim * 6.0))
+
+    def _duration_balance_entropy(self, durations) -> float:
+        """Use normalized entropy to encourage even use of available durations."""
+        if not durations:
+            return 0.0
+        counts = Counter(durations)
+        total = sum(counts.values())
+        if total == 0:
+            return 0.0
+        probs = [c / total for c in counts.values()]
+        H = -sum(p * math.log(p + 1e-9) for p in probs)
+        max_H = math.log(max(1, len(DURATIONS)))
+        norm = H / max_H if max_H > 1e-9 else 0.0
+        return min(6.0, max(0.0, norm * 6.0))
 
     def _cadence_melody_side(self, notes) -> float:
         """
