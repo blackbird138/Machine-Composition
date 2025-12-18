@@ -113,7 +113,17 @@ class GeneticOperators:
             if random.random() < self.mutation_rate:
                 note.duration = random.choice(DURATIONS)
         
+<<<<<<< Updated upstream
         self._fix_total_beats(mutated.notes)
+=======
+        # Re-normalize to exactly TARGET_BEATS
+        # current_beats = sum(n.duration for n in mutated.notes)
+        # if abs(current_beats - TARGET_BEATS) > 0.1:
+        #     if mutated.notes:
+        #         adjustment = TARGET_BEATS - current_beats
+        #         mutated.notes[-1].duration = max(0.5, mutated.notes[-1].duration + adjustment)
+        
+>>>>>>> Stashed changes
         return mutated
 
     # -----------------------

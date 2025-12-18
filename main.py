@@ -15,7 +15,11 @@ def main():
     
     # Initialize genetic algorithm
     ga = GeneticAlgorithm(
+<<<<<<< Updated upstream
         population_size=200,
+=======
+        population_size=100,
+>>>>>>> Stashed changes
         mutation_rate=0.15,
         crossover_rate=0.7
     )
@@ -36,9 +40,14 @@ def main():
     print("=" * 60)
     
     exporter = MelodyExporter()
+<<<<<<< Updated upstream
 
     for i, melody in enumerate(best_melodies[:10]):
 
+=======
+    
+    for i, melody in enumerate(best_melodies[:10]):
+>>>>>>> Stashed changes
         print(f"\n--- Melody {i+1} (Fitness: {melody.fitness_score:.2f}) ---")
         print(f"ABC: {melody.to_abc()}")
         print(f"Notes: {melody.notes}")

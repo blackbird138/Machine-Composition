@@ -1,12 +1,19 @@
 """
 Fitness evaluation functions for melody quality assessment
 with chord-inference-based harmony scoring (C major).
+<<<<<<< Updated upstream
 All sub-scores used in evaluate() are (0,1) via sigmoid,
 with per-function scales calibrated for melody length <= 32 notes.
 """
 
 from dataclasses import dataclass
 from typing import List, Tuple
+=======
+"""
+
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+>>>>>>> Stashed changes
 from collections import Counter
 import math
 
@@ -18,6 +25,7 @@ def pc(midi_pitch: int) -> int:
     return midi_pitch % 12
 
 
+<<<<<<< Updated upstream
 def sigmoid(x: float) -> float:
     """Smooth map R -> (0,1)."""
     # No clamp/min/max
@@ -30,6 +38,14 @@ class Chord:
     root_pc: int               # root pitch class
     tones: Tuple[int, ...]     # chord pitch classes
     function: str              # "T" tonic, "PD" predominant, "D" dominant
+=======
+@dataclass(frozen=True)
+class Chord:
+    name: str
+    root_pc: int              # root pitch class
+    tones: Tuple[int, ...]     # chord pitch classes
+    function: str             # "T" tonic, "PD" predominant, "D" dominant
+>>>>>>> Stashed changes
 
 
 def build_c_major_chords(include_v7: bool = True) -> List[Chord]:
@@ -57,6 +73,7 @@ class FitnessEvaluator:
     Evaluates melody quality based on:
     - Harmony inference (chord progression) + fit score (dominant weight)
     - Some lightweight melody-only heuristics as tie-breakers
+<<<<<<< Updated upstream
 
     All sub-scores used in evaluate() are returned in (0,1).
     Final score is a convex combination -> (0,1).
@@ -66,6 +83,10 @@ class FitnessEvaluator:
     # melody.notes length <= 32
     MAX_NOTES = 32
 
+=======
+    """
+
+>>>>>>> Stashed changes
     def __init__(
         self,
         scale=None,
@@ -82,6 +103,7 @@ class FitnessEvaluator:
 
         self.chords = build_c_major_chords(include_v7=include_v7)
         self.chord_by_name = {c.name: c for c in self.chords}
+<<<<<<< Updated upstream
 
         # -------------------------
         # Sigmoid calibration scales
@@ -114,6 +136,8 @@ class FitnessEvaluator:
         self.REP_CENTER = 10.0
         self.REP_SCALE = 0.3
 
+=======
+>>>>>>> Stashed changes
 
     def evaluate(self, melody):
         notes = melody.notes
@@ -122,6 +146,7 @@ class FitnessEvaluator:
             melody.chord_progression = []
             return 0.0
 
+<<<<<<< Updated upstream
         # 1) Harmony inference (0..1)
         progression, harmony_score, harmony_debug = self._harmony_fitness(notes)
 
@@ -420,6 +445,61 @@ class FitnessEvaluator:
 
         z = self.CADENCE_SCALE * (raw - self.CADENCE_CENTER)
         return sigmoid(z)
+=======
+        # 1) Harmony inference is the core:
+        progression, harmony_score, harmony_debug = self._harmony_fitness(notes)
+
+        # 2) Small tie-breakers (optional but helpful):
+        contour_score = self._melodic_contour(notes)     # 0-15
+        rhythmic_score = self._rhythmic_variety(notes)   # 0-10
+        cadence_score = self._cadence_melody_side(notes) # 0-5 (melody-only cadence hint)
+
+        total = harmony_score + contour_score + rhythmic_score + cadence_score
+
+        melody.fitness_score = float(max(0.0, min(100.0, total)))
+        melody.chord_progression = progression
+        melody.harmony_debug = harmony_debug  # 方便你打印调参（可删）
+        return melody.fitness_score
+
+    # -------------------------
+    # Melody-only tie-breakers
+    # -------------------------
+
+    def _melodic_contour(self, notes) -> float:
+        """
+        0-15: Penalize large jumps; keep as a small regularizer.
+        """
+        score = 15.0
+        for i in range(len(notes) - 1):
+            interval = abs(notes[i + 1].pitch - notes[i].pitch)
+            if interval > 12:
+                score -= 3.0
+            elif interval > 7:
+                score -= 1.5
+        return max(0.0, score)
+
+    def _rhythmic_variety(self, notes) -> float:
+        """
+        0-10: Reward variety (FIX your original sign bug).
+        """
+        durations = [n.duration for n in notes]
+        unique = len(set(durations))
+        denom = max(1, len(DURATIONS))
+        return (unique / denom) * 10.0
+
+    def _cadence_melody_side(self, notes) -> float:
+        """
+        0-5: End on tonic pitch class is a simple cadence hint.
+        (Harmony part already scores cadence strongly; this is tiny.)
+        """
+        end_pc = pc(notes[-1].pitch)
+        if end_pc == self.tonic_pc:
+            return 5.0
+        # 落在主三和弦也给一点
+        if end_pc in {self.tonic_pc, (self.tonic_pc + 4) % 12, (self.tonic_pc + 7) % 12}:
+            return 2.0
+        return 0.0
+>>>>>>> Stashed changes
 
     # -------------------------
     # Harmony inference + score
@@ -429,6 +509,7 @@ class FitnessEvaluator:
         """
         Returns:
           progression: list[str] chord names
+<<<<<<< Updated upstream
           harmony_score: (0,1)
           debug: dict
         """
@@ -448,12 +529,41 @@ class FitnessEvaluator:
             seg_notes = self._collect_segment_notes(events, a, b)
             emission.append([self._emission_score(ch, seg_notes, short_thresh) for ch in self.chords])
 
+=======
+          harmony_score: 0..70 (dominant part of total 100)
+          debug: dict
+        """
+        # Build timeline events (onset, offset, pitch)
+        events, total_beats = self._build_events(notes)
+
+        # Segment into fixed windows (segment_beats)
+        segments = self._build_segments(total_beats)
+
+        # Short-note threshold: treat very short non-chord tones as passing/neighbor tones
+        min_dur = min((n.duration for n in notes), default=self.segment_beats)
+        short_thresh = 1.5 * float(min_dur)
+
+        # Precompute emission scores: emission[t][j]
+        emission = []
+        seg_note_stats = []
+        for (a, b) in segments:
+            seg_notes = self._collect_segment_notes(events, a, b)
+            # store stats for debugging
+            seg_note_stats.append(seg_notes)
+            emission.append([self._emission_score(ch, seg_notes, short_thresh) for ch in self.chords])
+
+        # DP (Viterbi): dp[t][j] = best total score ending with chord j at segment t
+>>>>>>> Stashed changes
         T = len(segments)
         C = len(self.chords)
         NEG = -1e18
         dp = [[NEG] * C for _ in range(T)]
         prev = [[None] * C for _ in range(T)]
 
+<<<<<<< Updated upstream
+=======
+        # Priors: prefer starting with tonic-ish chords
+>>>>>>> Stashed changes
         start_bonus = [0.0] * C
         for j, ch in enumerate(self.chords):
             if ch.name == "C":
@@ -464,7 +574,11 @@ class FitnessEvaluator:
         for j in range(C):
             dp[0][j] = emission[0][j] + start_bonus[j]
 
+<<<<<<< Updated upstream
         change_cost = 0.35
+=======
+        change_cost = 0.35  # discourage changing chords too frequently
+>>>>>>> Stashed changes
 
         for t in range(1, T):
             for j, ch2 in enumerate(self.chords):
@@ -480,6 +594,10 @@ class FitnessEvaluator:
                 dp[t][j] = best_val
                 prev[t][j] = best_i
 
+<<<<<<< Updated upstream
+=======
+        # End bonus: cadence preference
+>>>>>>> Stashed changes
         end_bonus = [0.0] * C
         for j, ch in enumerate(self.chords):
             if ch.name == "C":
@@ -490,19 +608,34 @@ class FitnessEvaluator:
         last = max(range(C), key=lambda j: dp[T - 1][j] + end_bonus[j])
         best_raw = dp[T - 1][last] + end_bonus[last]
 
+<<<<<<< Updated upstream
+=======
+        # Backtrack progression
+>>>>>>> Stashed changes
         idxs = [last]
         for t in range(T - 1, 0, -1):
             idxs.append(prev[t][idxs[-1]])
         idxs.reverse()
         progression = [self.chords[i].name for i in idxs]
 
+<<<<<<< Updated upstream
         harmony_score = self._normalize_harmony(best_raw, total_beats)
 
+=======
+        # Normalize raw harmony score to 0..70
+        harmony_score = self._normalize_harmony(best_raw, total_beats)
+
+        # Extra diagnostics (optional)
+>>>>>>> Stashed changes
         fit_ratio = self._chord_tone_ratio(events, segments, idxs)
         debug = {
             "raw": best_raw,
             "total_beats": total_beats,
+<<<<<<< Updated upstream
             "per_beat": best_raw / (total_beats + 1e-12),
+=======
+            "per_beat": best_raw / max(1e-9, total_beats),
+>>>>>>> Stashed changes
             "fit_ratio": fit_ratio,
             "segments": [(a, b) for (a, b) in segments],
         }
@@ -510,6 +643,12 @@ class FitnessEvaluator:
         return progression, harmony_score, debug
 
     def _build_events(self, notes) -> Tuple[List[Tuple[float, float, int]], float]:
+<<<<<<< Updated upstream
+=======
+        """
+        Convert notes into (start, end, pitch). Time unit is 'beat' based on duration accumulation.
+        """
+>>>>>>> Stashed changes
         t = 0.0
         events = []
         for n in notes:
@@ -522,6 +661,7 @@ class FitnessEvaluator:
     def _build_segments(self, total_beats: float) -> List[Tuple[float, float]]:
         segs = []
         cur = 0.0
+<<<<<<< Updated upstream
 
         step = self.segment_beats if self.segment_beats > 1e-9 else 1e-9
 
@@ -530,6 +670,12 @@ class FitnessEvaluator:
             segs.append((cur, nxt if nxt < total_beats else total_beats))
             cur += step
 
+=======
+        step = max(1e-9, self.segment_beats)
+        while cur < total_beats - 1e-9:
+            segs.append((cur, min(total_beats, cur + step)))
+            cur += step
+>>>>>>> Stashed changes
         if not segs:
             segs = [(0.0, total_beats)]
         return segs
@@ -540,6 +686,13 @@ class FitnessEvaluator:
         seg_start: float,
         seg_end: float
     ) -> List[Tuple[int, float]]:
+<<<<<<< Updated upstream
+=======
+        """
+        Return list of (pitch, overlap_duration) within the segment.
+        Handles notes crossing segment boundaries by splitting via overlap.
+        """
+>>>>>>> Stashed changes
         seg_notes = []
         for s, e, p in events:
             overlap = max(0.0, min(e, seg_end) - max(s, seg_start))
@@ -548,6 +701,15 @@ class FitnessEvaluator:
         return seg_notes
 
     def _emission_score(self, chord: Chord, seg_notes: List[Tuple[int, float]], short_thresh: float) -> float:
+<<<<<<< Updated upstream
+=======
+        """
+        Melody-chord fit score for one segment.
+        - chord tone: strong reward
+        - in-scale non-chord tone: mild penalty if long; mild reward if very short (passing/neighbor)
+        - out-of-scale: heavy penalty
+        """
+>>>>>>> Stashed changes
         score = 0.0
         chord_tones = set(chord.tones)
 
@@ -565,24 +727,49 @@ class FitnessEvaluator:
         return score
 
     def _transition_score(self, c1: Chord, c2: Chord) -> float:
+<<<<<<< Updated upstream
         func_bonus = {
             ("T", "PD"): 1.0,
             ("PD", "D"): 2.0,
             ("D", "T"): 3.0,
+=======
+        """
+        Harmony grammar preference.
+        Core idea: T -> PD -> D -> T is the most typical flow.
+        Also reward fifth/fourth root motion and V->I cadence.
+        """
+        func_bonus = {
+            ("T", "PD"): 1.0,
+            ("PD", "D"): 2.0,
+            ("D", "T"): 3.0,     # dominant resolves to tonic
+>>>>>>> Stashed changes
             ("T", "D"): 0.8,
             ("T", "T"): 0.3,
             ("PD", "T"): 0.2,
             ("PD", "PD"): 0.0,
             ("D", "D"): 0.0,
+<<<<<<< Updated upstream
             ("D", "PD"): -1.0,
+=======
+            ("D", "PD"): -1.0,   # usually "backwards"
+>>>>>>> Stashed changes
         }
 
         s = func_bonus.get((c1.function, c2.function), -0.2)
 
+<<<<<<< Updated upstream
         diff = (c2.root_pc - c1.root_pc) % 12
         if diff in (5, 7):
             s += 0.8
 
+=======
+        # Root motion: prefer circle-of-fifths (down 5th / up 4th)
+        diff = (c2.root_pc - c1.root_pc) % 12
+        if diff in (5, 7):  # +5 (P4) or +7 (P5)
+            s += 0.8
+
+        # Cadence: V -> I bonus
+>>>>>>> Stashed changes
         if c1.function == "D" and c2.name == "C":
             s += 1.2
 
@@ -590,6 +777,7 @@ class FitnessEvaluator:
 
     def _normalize_harmony(self, raw: float, total_beats: float) -> float:
         """
+<<<<<<< Updated upstream
         Map per-beat DP score to (0,1) via sigmoid with calibrated scale.
         No lo/hi clamp.
         """
@@ -598,6 +786,23 @@ class FitnessEvaluator:
         return sigmoid(z)
 
     def _chord_tone_ratio(self, events, segments, chord_idxs) -> float:
+=======
+        Convert raw DP score (length dependent) into a 0..70 score.
+        We normalize by beats and clamp to a plausible range.
+        """
+        per_beat = raw / max(1e-9, total_beats)
+
+        # These bounds are empirical heuristics for this emission/transition scale.
+        lo, hi = -1.2, 2.2
+        x = max(lo, min(hi, per_beat))
+        ratio = (x - lo) / (hi - lo)  # 0..1
+        return 70.0 * ratio
+
+    def _chord_tone_ratio(self, events, segments, chord_idxs) -> float:
+        """
+        Diagnostic: duration-weighted ratio of chord-tones under inferred chords.
+        """
+>>>>>>> Stashed changes
         total = 0.0
         hit = 0.0
         for (seg, ci) in zip(segments, chord_idxs):
