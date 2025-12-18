@@ -1,10 +1,12 @@
 """
 Fitness evaluation functions for melody quality assessment
 with chord-inference-based harmony scoring (C major).
+All sub-scores used in evaluate() are (0,1) via sigmoid,
+with per-function scales calibrated for melody length <= 32 notes.
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 from collections import Counter
 import math
 
@@ -16,12 +18,18 @@ def pc(midi_pitch: int) -> int:
     return midi_pitch % 12
 
 
+def sigmoid(x: float) -> float:
+    """Smooth map R -> (0,1)."""
+    # No clamp/min/max
+    return 1.0 / (1.0 + math.exp(-x))
+
+
 @dataclass(frozen=True)
 class Chord:
     name: str
-    root_pc: int              # root pitch class
+    root_pc: int               # root pitch class
     tones: Tuple[int, ...]     # chord pitch classes
-    function: str             # "T" tonic, "PD" predominant, "D" dominant
+    function: str              # "T" tonic, "PD" predominant, "D" dominant
 
 
 def build_c_major_chords(include_v7: bool = True) -> List[Chord]:
@@ -49,7 +57,14 @@ class FitnessEvaluator:
     Evaluates melody quality based on:
     - Harmony inference (chord progression) + fit score (dominant weight)
     - Some lightweight melody-only heuristics as tie-breakers
+
+    All sub-scores used in evaluate() are returned in (0,1).
+    Final score is a convex combination -> (0,1).
     """
+
+    # Assumption given by user:
+    # melody.notes length <= 32
+    MAX_NOTES = 32
 
     def __init__(
         self,
@@ -68,6 +83,38 @@ class FitnessEvaluator:
         self.chords = build_c_major_chords(include_v7=include_v7)
         self.chord_by_name = {c.name: c for c in self.chords}
 
+        # -------------------------
+        # Sigmoid calibration scales
+        # -------------------------
+        # These are "pre-sigmoid" scales, chosen to be reasonable for <=32 notes.
+
+        # Contour: penalty per transition can be up to ~3, and transitions <= 31 -> penalty up to ~93.
+        # We compute score = sigmoid(scale * (center - penalty)).
+        # Choose center around ~15 (very clean contour), scale ~0.30 so:
+        #   penalty=0 -> sigmoid(4.5) ~ 0.989
+        #   penalty=30 -> sigmoid(-4.5) ~ 0.011
+        self.CONTOUR_CENTER = 30.0
+        self.CONTOUR_SCALE = 0.1
+
+        # Rhythm: we build a raw rhythm score in [0,1] (by convex combination),
+        # then apply sigmoid around 0.5 to softly emphasize "better than average".
+        self.RHYTHM_CENTER = 0.50
+        self.RHYTHM_SCALE = 6.0
+
+        # Cadence: raw in {0, 0.4, 1.0}, map with sigmoid around 0.5
+        self.CADENCE_CENTER = 0.50
+        self.CADENCE_SCALE = 8.0
+
+        # Harmony: per-beat DP score typically around [-1, 2+], depends on emission/transition.
+        # Map with sigmoid around a moderate center.
+        self.HARMONY_CENTER = 0.60
+        self.HARMONY_SCALE = 2.5
+
+        # Repetition: penalty can be O(n^2) but decays fast; map via sigmoid
+        self.REP_CENTER = 10.0
+        self.REP_SCALE = 0.3
+
+
     def evaluate(self, melody):
         notes = melody.notes
         if not notes:
@@ -75,17 +122,32 @@ class FitnessEvaluator:
             melody.chord_progression = []
             return 0.0
 
-        # 1) Harmony inference is the core:
+        # 1) Harmony inference (0..1)
         progression, harmony_score, harmony_debug = self._harmony_fitness(notes)
 
-        # 2) Tie-breakers (lightweight; rhythm carries smarter weight):
-        contour_score = self._melodic_contour(notes)       # 0-15
-        rhythmic_score = self._rhythmic_interest(notes)    # 0-24 (variety + balance + syncopation)
-        cadence_score = self._cadence_melody_side(notes)   # 0-5 (melody-only cadence hint)
+        # 2) Tie-breakers (0..1)
+        contour_score = self._melodic_contour(notes)           # (0,1)
+        repetition_score = self._repetition_penalty_score(notes) # (0,1)
+        rhythmic_score = self._rhythmic_interest(notes)        # (0,1)
+        cadence_score = self._cadence_melody_side(notes)       # (0,1)
 
-        total = harmony_score + contour_score + rhythmic_score + cadence_score
+        # Weights sum to 1.0
+        w_harmony = 0.6
+        w_contour = 0.15
+        w_repeat  = 0.1
+        w_rhythm  = 0.1
+        w_cadence = 0.05
 
-        melody.fitness_score = float(max(0.0, min(100.0, total)))
+        total = (
+            w_harmony * harmony_score +
+            w_contour * contour_score +
+            w_repeat  * repetition_score +
+            w_rhythm  * rhythmic_score +
+            w_cadence * cadence_score
+        )
+
+
+        melody.fitness_score = float(total)
         melody.chord_progression = progression
         melody.harmony_debug = harmony_debug  # 方便你打印调参（可删）
         return melody.fitness_score
@@ -96,26 +158,88 @@ class FitnessEvaluator:
 
     def _melodic_contour(self, notes) -> float:
         """
-        0-15: Penalize large jumps; keep as a small regularizer.
+        Returns (0,1).
+        Only evaluates local contour quality:
+          - large leap penalty
+          - consonance/dissonance penalty based on interval class
+        Repetition is handled separately in _repetition_penalty_score().
         """
-        score = 15.0
-        for i in range(len(notes) - 1):
-            interval = abs(notes[i + 1].pitch - notes[i].pitch)
-            if interval > 12:
-                score -= 3.0
-            elif interval > 7:
-                score -= 1.5
-        return max(0.0, score)
+        penalty = 0.0
+        n = len(notes)
+
+        for i in range(n - 1):
+            a = int(notes[i].pitch)
+            b = int(notes[i + 1].pitch)
+
+            abs_int = abs(b - a)
+
+            # large leap penalty
+            if abs_int > 12:
+                penalty += 5.0
+            elif abs_int > 7:
+                penalty += 1.0
+            elif abs_int > 5:
+                penalty += 0.5
+
+            # consonance/dissonance penalty via interval class (mod 12)
+            ic = abs_int % 12
+            if ic == 0:
+                penalty += 0.0
+            elif ic == 7:
+                penalty += 0.2
+            elif ic == 5:
+                penalty += 0.35
+            elif ic == 4:
+                penalty += 0.45
+            elif ic == 3:
+                penalty += 0.55
+            elif ic == 9:
+                penalty += 0.60
+            elif ic == 8:
+                penalty += 0.70
+            elif ic == 2:
+                penalty += 1.20
+            elif ic == 10:
+                penalty += 1.20
+            elif ic == 1:
+                penalty += 1.45
+            elif ic == 11:
+                penalty += 1.45
+            elif ic == 6:
+                penalty += 1.80
+            else:
+                penalty += 1.0
+
+        z = self.CONTOUR_SCALE * (self.CONTOUR_CENTER - penalty)
+        return sigmoid(z)
+
+    def _repetition_penalty_score(self, notes) -> float:
+        """
+        Returns (0,1).
+        Enumerate all pairs (i<j). If pitches are identical, add a penalty that decays
+        with distance d=j-i:  A * exp(-alpha*(d-1)).
+        Then map (center - penalty) through sigmoid.
+        """
+        n = len(notes)
+        penalty = 0.0
+
+        for i in range(n):
+            pi = int(notes[i].pitch)
+            for j in range(i + 1, n):
+                if int(notes[j].pitch) == pi:
+                    d = float(j - i)  # >= 1
+                    penalty += 1.0 / d
+
+        z = self.REP_SCALE * (self.REP_CENTER - penalty)
+        return sigmoid(z)
+
 
     def _rhythmic_interest(self, notes) -> float:
         """
-        0-24: Smarter rhythm score.
-        Components:
-          - Duration variety (0-8)
-          - Balance / maximal evenness via entropy (0-6)
-          - Penalize long runs of identical durations (0 to -6)
-          - Downbeat support (0-8)
-          - Syncopation / off-beat presence (“奇性”) (0-6)
+        Returns (0,1).
+        Build raw rhythm quality in [0,1] via convex combination,
+        then pass through sigmoid with a calibrated scale.
+        No hard clamp/min/max.
         """
         durations = [n.duration for n in notes]
         if not durations:
@@ -128,15 +252,15 @@ class FitnessEvaluator:
             onsets.append((t, n.duration))
             t += n.duration
 
-        # 1) Variety of durations (encourage at least 2-3 kinds)
-        unique = len(set(durations))
-        denom = max(1, len(DURATIONS))
-        variety = min(1.0, unique / denom) * 8.0  # 0..8
+        # 1) Variety of durations: 0..1 (smoothly saturating)
+        unique = float(len(set(durations)))
+        denom = float(len(DURATIONS)) if len(DURATIONS) > 0 else 1.0
+        variety01 = 1.0 - math.exp(-unique / denom)
 
-        # 2) Balance / maximal evenness: encourage near-uniform use of available durations
-        balance = self._duration_balance_entropy(durations)  # 0..6
+        # 2) Balance entropy: returns 0..1 (we normalize internally)
+        balance01 = self._duration_balance_entropy01(durations)
 
-        # 3) Penalize long identical runs (avoid monotonous grids)
+        # 3) Penalize long identical runs: convert penalty to "goodness" in (0,1]
         penalty = 0.0
         run_len = 1
         for i in range(1, len(durations)):
@@ -144,58 +268,100 @@ class FitnessEvaluator:
                 run_len += 1
             else:
                 if run_len >= 4:
-                    penalty += (run_len - 3) * 1.5  # each extra adds penalty
+                    penalty += (run_len - 3) * 1.5
                 run_len = 1
         if run_len >= 4:
             penalty += (run_len - 3) * 1.5
-        penalty = min(penalty, 6.0)  # cap penalty
 
-        # 4) Downbeat support: longer notes on bar starts sound more grounded
-        downbeat_bonus = self._downbeat_bonus_onsets(onsets)
+        monotony01 = math.exp(-0.25 * penalty)
 
-        # 5) Syncopation / off-beat presence (奇性): reward tasteful off-beat starts / ties
-        sync_bonus = self._syncopation_bonus(onsets)
+        # 4) Downbeat support: map count-like bonus into (0,1)
+        downbeat01 = self._downbeat_bonus01(onsets)
 
-        # 6) Bar-to-bar rhythmic similarity: encourage reusable groove cells
-        similarity_bonus = self._bar_rhythm_similarity(onsets)
+        # 5) Syncopation / off-beat presence: (0,1)
+        sync01 = self._syncopation_bonus01(onsets)
 
-        score = variety + balance - penalty + downbeat_bonus + sync_bonus + similarity_bonus
-        return max(0.0, min(24.0, score))
+        # 6) Bar-to-bar rhythmic similarity: already in [0,1]
+        sim01 = self._bar_rhythm_similarity01(onsets)
 
-    def _downbeat_bonus_onsets(self, onsets) -> float:
-        """Reward placing longer notes (>=1 beat) on bar downbeats."""
-        if not onsets:
+        # Raw rhythm score in [0,1] via convex combination
+        w_var, w_bal, w_mono, w_down, w_sync, w_sim = 0.18, 0.17, 0.18, 0.18, 0.14, 0.15
+        raw01 = (
+            w_var  * variety01 +
+            w_bal  * balance01 +
+            w_mono * monotony01 +
+            w_down * downbeat01 +
+            w_sync * sync01 +
+            w_sim  * sim01
+        )
+
+        # Final smooth shaping around "average" 0.5
+        z = self.RHYTHM_SCALE * (raw01 - self.RHYTHM_CENTER)
+        return sigmoid(z)
+
+    def _duration_balance_entropy01(self, durations) -> float:
+        """
+        Normalized entropy in [0,1] (no clamp).
+        """
+        counts = Counter(durations)
+        total = float(sum(counts.values()))
+        if total <= 0.0:
             return 0.0
 
+        probs = [c / total for c in counts.values()]
+        H = -sum(p * math.log(p + 1e-12) for p in probs)
+
+        # The theoretical maximum is log(K) where K is number of possible symbols.
+        # We normalize by log(len(DURATIONS)) to keep a stable scale.
+        K = float(len(DURATIONS)) if len(DURATIONS) > 0 else 1.0
+        max_H = math.log(K + 1e-12)
+
+        # If K == 1, entropy is always 0; return 0.
+        if max_H <= 1e-12:
+            return 0.0
+
+        return H / max_H
+
+    def _downbeat_bonus01(self, onsets) -> float:
+        """
+        Reward placing longer notes (>=1 beat) on bar downbeats.
+        Convert additive bonus to (0,1) smoothly (no cap).
+        """
         bonus = 0.0
         for start, dur in onsets:
             beat_in_measure = start % self.beats_per_measure
-            if beat_in_measure < 1e-6 and dur >= 1.0:  # starts exactly on barline and lasts at least a quarter
+            if beat_in_measure < 1e-6 and dur >= 1.0:
                 bonus += 1.6
-        return min(8.0, bonus)
 
-    def _syncopation_bonus(self, onsets) -> float:
-        """Reward tasteful off-beat or cross-beat placements (奇性)."""
-        if not onsets:
-            return 0.0
+        # Smooth saturating map: 1 - exp(-bonus/scale)
+        # Use scale ~8 so a few strong downbeats already give noticeable reward.
+        scale = 8.0
+        return 1.0 - math.exp(-bonus / (scale + 1e-12))
 
+    def _syncopation_bonus01(self, onsets) -> float:
+        """
+        Reward tasteful off-beat or cross-beat placements.
+        Convert additive bonus to (0,1) smoothly (no cap).
+        """
         bonus = 0.0
         for start, dur in onsets:
             beat_pos = start % self.beats_per_measure
             within_beat = beat_pos % 1.0
 
-            # Off-beat starts (e.g., on 0.5) get a small bonus
             if 0.45 < within_beat < 0.55:
                 bonus += 0.8
 
-            # Cross-beat tie / syncopation: duration spans over a beat boundary
             if within_beat + dur > 1.0 and dur >= 0.5:
                 bonus += 1.0
 
-        return min(6.0, bonus)
+        scale = 6.0
+        return 1.0 - math.exp(-bonus / (scale + 1e-12))
 
-    def _bar_rhythm_similarity(self, onsets) -> float:
-        """Encourage similar rhythmic cells across 4 bars (up to 6 points)."""
+    def _bar_rhythm_similarity01(self, onsets) -> float:
+        """
+        Encourage similar rhythmic cells across up to 4 bars.
+        Return in [0,1] (no clamp/min/max).
+        """
         if not onsets:
             return 0.0
 
@@ -203,7 +369,6 @@ class FitnessEvaluator:
         slots_per_bar = int(bar_len * 2)  # 0.5 beat grid
         bars = [[] for _ in range(4)]
 
-        # Build slot patterns for each bar (onset '1', sustain '0')
         for start, dur in onsets:
             bar_idx = int(start // bar_len)
             if bar_idx >= 4:
@@ -216,7 +381,6 @@ class FitnessEvaluator:
                 remaining -= 0.5
                 pos += 1
 
-        # Normalize lengths to slots_per_bar
         bar_patterns = []
         for b in bars:
             if len(b) < slots_per_bar:
@@ -225,7 +389,6 @@ class FitnessEvaluator:
                 b = b[:slots_per_bar]
             bar_patterns.append(''.join(b))
 
-        # Pairwise Hamming similarity among available bars
         sims = []
         for i in range(len(bar_patterns)):
             for j in range(i + 1, len(bar_patterns)):
@@ -237,35 +400,26 @@ class FitnessEvaluator:
 
         if not sims:
             return 0.0
-        avg_sim = sum(sims) / len(sims)  # 0..1
-        return min(6.0, max(0.0, avg_sim * 6.0))
 
-    def _duration_balance_entropy(self, durations) -> float:
-        """Use normalized entropy to encourage even use of available durations."""
-        if not durations:
-            return 0.0
-        counts = Counter(durations)
-        total = sum(counts.values())
-        if total == 0:
-            return 0.0
-        probs = [c / total for c in counts.values()]
-        H = -sum(p * math.log(p + 1e-9) for p in probs)
-        max_H = math.log(max(1, len(DURATIONS)))
-        norm = H / max_H if max_H > 1e-9 else 0.0
-        return min(6.0, max(0.0, norm * 6.0))
+        return sum(sims) / float(len(sims))
 
     def _cadence_melody_side(self, notes) -> float:
         """
-        0-5: End on tonic pitch class is a simple cadence hint.
-        (Harmony part already scores cadence strongly; this is tiny.)
+        Returns (0,1) via sigmoid with scale.
+        No clamp/min/max.
         """
         end_pc = pc(notes[-1].pitch)
+
+        # raw cadence hint in [0,1]
         if end_pc == self.tonic_pc:
-            return 5.0
-        # 落在主三和弦也给一点
-        if end_pc in {self.tonic_pc, (self.tonic_pc + 4) % 12, (self.tonic_pc + 7) % 12}:
-            return 2.0
-        return 0.0
+            raw = 1.0
+        elif end_pc in {self.tonic_pc, (self.tonic_pc + 4) % 12, (self.tonic_pc + 7) % 12}:
+            raw = 0.4
+        else:
+            raw = 0.0
+
+        z = self.CADENCE_SCALE * (raw - self.CADENCE_CENTER)
+        return sigmoid(z)
 
     # -------------------------
     # Harmony inference + score
@@ -275,36 +429,31 @@ class FitnessEvaluator:
         """
         Returns:
           progression: list[str] chord names
-          harmony_score: 0..70 (dominant part of total 100)
+          harmony_score: (0,1)
           debug: dict
         """
-        # Build timeline events (onset, offset, pitch)
         events, total_beats = self._build_events(notes)
-
-        # Segment into fixed windows (segment_beats)
         segments = self._build_segments(total_beats)
 
         # Short-note threshold: treat very short non-chord tones as passing/neighbor tones
-        min_dur = min((n.duration for n in notes), default=self.segment_beats)
+        min_dur = self.segment_beats
+        for n in notes:
+            d = float(n.duration)
+            if d < min_dur:
+                min_dur = d
         short_thresh = 1.5 * float(min_dur)
 
-        # Precompute emission scores: emission[t][j]
         emission = []
-        seg_note_stats = []
         for (a, b) in segments:
             seg_notes = self._collect_segment_notes(events, a, b)
-            # store stats for debugging
-            seg_note_stats.append(seg_notes)
             emission.append([self._emission_score(ch, seg_notes, short_thresh) for ch in self.chords])
 
-        # DP (Viterbi): dp[t][j] = best total score ending with chord j at segment t
         T = len(segments)
         C = len(self.chords)
         NEG = -1e18
         dp = [[NEG] * C for _ in range(T)]
         prev = [[None] * C for _ in range(T)]
 
-        # Priors: prefer starting with tonic-ish chords
         start_bonus = [0.0] * C
         for j, ch in enumerate(self.chords):
             if ch.name == "C":
@@ -315,7 +464,7 @@ class FitnessEvaluator:
         for j in range(C):
             dp[0][j] = emission[0][j] + start_bonus[j]
 
-        change_cost = 0.35  # discourage changing chords too frequently
+        change_cost = 0.35
 
         for t in range(1, T):
             for j, ch2 in enumerate(self.chords):
@@ -331,7 +480,6 @@ class FitnessEvaluator:
                 dp[t][j] = best_val
                 prev[t][j] = best_i
 
-        # End bonus: cadence preference
         end_bonus = [0.0] * C
         for j, ch in enumerate(self.chords):
             if ch.name == "C":
@@ -342,22 +490,19 @@ class FitnessEvaluator:
         last = max(range(C), key=lambda j: dp[T - 1][j] + end_bonus[j])
         best_raw = dp[T - 1][last] + end_bonus[last]
 
-        # Backtrack progression
         idxs = [last]
         for t in range(T - 1, 0, -1):
             idxs.append(prev[t][idxs[-1]])
         idxs.reverse()
         progression = [self.chords[i].name for i in idxs]
 
-        # Normalize raw harmony score to 0..70
         harmony_score = self._normalize_harmony(best_raw, total_beats)
 
-        # Extra diagnostics (optional)
         fit_ratio = self._chord_tone_ratio(events, segments, idxs)
         debug = {
             "raw": best_raw,
             "total_beats": total_beats,
-            "per_beat": best_raw / max(1e-9, total_beats),
+            "per_beat": best_raw / (total_beats + 1e-12),
             "fit_ratio": fit_ratio,
             "segments": [(a, b) for (a, b) in segments],
         }
@@ -365,9 +510,6 @@ class FitnessEvaluator:
         return progression, harmony_score, debug
 
     def _build_events(self, notes) -> Tuple[List[Tuple[float, float, int]], float]:
-        """
-        Convert notes into (start, end, pitch). Time unit is 'beat' based on duration accumulation.
-        """
         t = 0.0
         events = []
         for n in notes:
@@ -380,10 +522,14 @@ class FitnessEvaluator:
     def _build_segments(self, total_beats: float) -> List[Tuple[float, float]]:
         segs = []
         cur = 0.0
-        step = max(1e-9, self.segment_beats)
+
+        step = self.segment_beats if self.segment_beats > 1e-9 else 1e-9
+
         while cur < total_beats - 1e-9:
-            segs.append((cur, min(total_beats, cur + step)))
+            nxt = cur + step
+            segs.append((cur, nxt if nxt < total_beats else total_beats))
             cur += step
+
         if not segs:
             segs = [(0.0, total_beats)]
         return segs
@@ -394,10 +540,6 @@ class FitnessEvaluator:
         seg_start: float,
         seg_end: float
     ) -> List[Tuple[int, float]]:
-        """
-        Return list of (pitch, overlap_duration) within the segment.
-        Handles notes crossing segment boundaries by splitting via overlap.
-        """
         seg_notes = []
         for s, e, p in events:
             overlap = max(0.0, min(e, seg_end) - max(s, seg_start))
@@ -406,12 +548,6 @@ class FitnessEvaluator:
         return seg_notes
 
     def _emission_score(self, chord: Chord, seg_notes: List[Tuple[int, float]], short_thresh: float) -> float:
-        """
-        Melody-chord fit score for one segment.
-        - chord tone: strong reward
-        - in-scale non-chord tone: mild penalty if long; mild reward if very short (passing/neighbor)
-        - out-of-scale: heavy penalty
-        """
         score = 0.0
         chord_tones = set(chord.tones)
 
@@ -429,31 +565,24 @@ class FitnessEvaluator:
         return score
 
     def _transition_score(self, c1: Chord, c2: Chord) -> float:
-        """
-        Harmony grammar preference.
-        Core idea: T -> PD -> D -> T is the most typical flow.
-        Also reward fifth/fourth root motion and V->I cadence.
-        """
         func_bonus = {
             ("T", "PD"): 1.0,
             ("PD", "D"): 2.0,
-            ("D", "T"): 3.0,     # dominant resolves to tonic
+            ("D", "T"): 3.0,
             ("T", "D"): 0.8,
             ("T", "T"): 0.3,
             ("PD", "T"): 0.2,
             ("PD", "PD"): 0.0,
             ("D", "D"): 0.0,
-            ("D", "PD"): -1.0,   # usually "backwards"
+            ("D", "PD"): -1.0,
         }
 
         s = func_bonus.get((c1.function, c2.function), -0.2)
 
-        # Root motion: prefer circle-of-fifths (down 5th / up 4th)
         diff = (c2.root_pc - c1.root_pc) % 12
-        if diff in (5, 7):  # +5 (P4) or +7 (P5)
+        if diff in (5, 7):
             s += 0.8
 
-        # Cadence: V -> I bonus
         if c1.function == "D" and c2.name == "C":
             s += 1.2
 
@@ -461,21 +590,14 @@ class FitnessEvaluator:
 
     def _normalize_harmony(self, raw: float, total_beats: float) -> float:
         """
-        Convert raw DP score (length dependent) into a 0..70 score.
-        We normalize by beats and clamp to a plausible range.
+        Map per-beat DP score to (0,1) via sigmoid with calibrated scale.
+        No lo/hi clamp.
         """
-        per_beat = raw / max(1e-9, total_beats)
-
-        # These bounds are empirical heuristics for this emission/transition scale.
-        lo, hi = -1.2, 2.2
-        x = max(lo, min(hi, per_beat))
-        ratio = (x - lo) / (hi - lo)  # 0..1
-        return 70.0 * ratio
+        per_beat = raw / (total_beats + 1e-12)
+        z = self.HARMONY_SCALE * (per_beat - self.HARMONY_CENTER)
+        return sigmoid(z)
 
     def _chord_tone_ratio(self, events, segments, chord_idxs) -> float:
-        """
-        Diagnostic: duration-weighted ratio of chord-tones under inferred chords.
-        """
         total = 0.0
         hit = 0.0
         for (seg, ci) in zip(segments, chord_idxs):

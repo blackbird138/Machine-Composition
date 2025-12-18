@@ -4,6 +4,7 @@ Main entry point for the music composition genetic algorithm.
 
 from src.genetic_algorithm import GeneticAlgorithm
 from src.exporter import MelodyExporter
+from src.fitness import FitnessEvaluator
 
 
 def main():
@@ -14,7 +15,7 @@ def main():
     
     # Initialize genetic algorithm
     ga = GeneticAlgorithm(
-        population_size=20,
+        population_size=200,
         mutation_rate=0.15,
         crossover_rate=0.7
     )
@@ -35,8 +36,9 @@ def main():
     print("=" * 60)
     
     exporter = MelodyExporter()
-    
-    for i, melody in enumerate(best_melodies[:3]):
+
+    for i, melody in enumerate(best_melodies[:10]):
+
         print(f"\n--- Melody {i+1} (Fitness: {melody.fitness_score:.2f}) ---")
         print(f"ABC: {melody.to_abc()}")
         print(f"Notes: {melody.notes}")
