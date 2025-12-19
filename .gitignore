@@ -3,3 +3,5 @@ melody_2.abc
 melody_3.abc
 
 *.pyc
+*.abc
+*.mid
