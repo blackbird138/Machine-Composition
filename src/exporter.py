@@ -1,23 +1,8 @@
-"""
-Export melodies to ABC notation and MIDI files.
-"""
-
 from .constants import TIME_SIGNATURE, KEY_SIGNATURE
 
-
 class MelodyExporter:
-    """Export melodies to various formats."""
-    
     @staticmethod
     def to_abc_file(melody, filename="output.abc", title="Generated Melody"):
-        """
-        Export melody to ABC notation file.
-        
-        Args:
-            melody (Melody): Melody to export
-            filename (str): Output filename
-            title (str): Title for the ABC notation
-        """
         abc_content = f"""X:1
 T:{title}
 M:{TIME_SIGNATURE}
@@ -31,21 +16,10 @@ K:{KEY_SIGNATURE}
 
     @staticmethod
     def to_midi_file(melody, filename="output.mid", tempo=120):
-        """
-        Export melody to MIDI file (requires midiutil).
-        
-        Args:
-            melody (Melody): Melody to export
-            filename (str): Output filename
-            tempo (int): Tempo in BPM
-            
-        Returns:
-            bool: True if successful, False if midiutil not available
-        """
         try:
             from midiutil import MIDIFile
             
-            midi = MIDIFile(1)  # One track
+            midi = MIDIFile(1)
             track = 0
             channel = 0
             volume = 100

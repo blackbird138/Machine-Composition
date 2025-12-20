@@ -1,36 +1,28 @@
-"""
-Main entry point for the music composition genetic algorithm.
-"""
-
 from src.genetic_algorithm import GeneticAlgorithm
 from src.exporter import MelodyExporter
 from src.fitness import FitnessEvaluator
 
 
 def main():
-    """Run the genetic algorithm and export results."""
     print("=" * 60)
     print("Genetic Algorithm for Music Composition")
     print("=" * 60)
     
-    # Initialize genetic algorithm
+    fittness_evaluator = FitnessEvaluator()
     ga = GeneticAlgorithm(
         population_size=100,
         mutation_rate=0.15,
-        crossover_rate=0.7
+        crossover_rate=0.7,
+        fitness_evaluator=fittness_evaluator
     )
     
-    # Generate initial population
     ga.generate_initial_population()
     
-    # Show a sample from initial population
     print("\nSample from initial population:")
     print(f"Melody 0: {ga.population[0].to_abc()}")
     
-    # Evolve for 100 generations
     best_melodies = ga.evolve(generations=100)
     
-    # Display and export results
     print("\n" + "=" * 60)
     print("Top 3 Melodies:")
     print("=" * 60)
@@ -42,7 +34,6 @@ def main():
         print(f"ABC: {melody.to_abc()}")
         print(f"Notes: {melody.notes}")
         
-        # Export to files
         exporter.to_abc_file(melody, f"melody_{i+1}.abc", f"Generated Melody {i+1}")
         exporter.to_midi_file(melody, f"melody_{i+1}.mid")
     
