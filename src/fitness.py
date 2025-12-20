@@ -246,7 +246,7 @@ class FitnessEvaluator:
         per_beat = raw / max(1e-9, total_beats)
         lo, hi = -1.2, 2.2
         x = max(lo, min(hi, per_beat))
-        ratio = (x - lo) / (hi - lo)  # 0..1
+        ratio = (x - lo) / (hi - lo)
         return 70.0 * ratio
 
     def _chord_tone_ratio(self, events, segments, chord_idxs) -> float:
