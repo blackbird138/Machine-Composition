@@ -10,7 +10,7 @@ def main():
     
     fittness_evaluator = FitnessEvaluator()
     ga = GeneticAlgorithm(
-        population_size=100,
+        population_size=200,
         mutation_rate=0.15,
         crossover_rate=0.7,
         fitness_evaluator=fittness_evaluator
